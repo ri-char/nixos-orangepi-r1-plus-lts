@@ -41,7 +41,6 @@
       filesToInstall = ["u-boot.itb" "idbloader.img"];
     };
     partitionsOffset = 16;
-    firmwarePartition = false;
     populateRootCommands = ''
       mkdir -p ./files/boot
       ${config.boot.loader.generic-extlinux-compatible.populateCmd} -c ${config.system.build.toplevel} -d ./files/boot

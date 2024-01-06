@@ -1,12 +1,8 @@
 # This module creates a bootable SD card image containing the given NixOS
-# configuration. The generated image is MBR partitioned, with a FAT
-# /boot/firmware partition, and ext4 root partition. The generated image
-# is sized to fit its contents, and a boot script automatically resizes
-# the root partition to fit the device on the first boot.
-#
-# The firmware partition is built with expectation to hold the Raspberry
-# Pi firmware and bootloader, and be removed and replaced with a firmware
-# build for the target SoC for other board families.
+# configuration. The generated image is MBR partitioned, with a root
+# partition. The generated image is sized to fit its contents, and a boot
+# script automatically resizes the root partition to fit the device on
+# the first boot.
 #
 # The derivation for the SD image will be placed in
 # config.system.build.sdImage
@@ -18,18 +14,12 @@
   ...
 }:
 with lib; let
-  rootfsImage = pkgs.callPackage (modulesPath + "/../lib/make-ext4-fs.nix") ({
-      inherit (config.sdImage) storePaths;
-      compressImage = true;
-      populateImageCommands = config.sdImage.populateRootCommands;
-      volumeLabel = "NIXOS_SD";
-    }
-    // optionalAttrs (config.sdImage.rootPartitionUUID != null) {
-      uuid = config.sdImage.rootPartitionUUID;
-    });
-
-  hasFirmwarePartition = with config.sdImage;
-    firmwarePartition && firmwarePartitionSize > 0;
+  rootfsImage = pkgs.callPackage (modulesPath + "/../lib/make-ext4-fs.nix") {
+    inherit (config.sdImage) storePaths;
+    compressImage = false;
+    populateImageCommands = config.sdImage.populateRootCommands;
+    volumeLabel = "NIXOS_SD";
+  };
 
   compressedImageExtension = with config.sdImage;
     if compressImage
@@ -46,8 +36,6 @@ with lib; let
     "-${toString compressImageLevel}";
 in {
   imports = [
-    (mkRemovedOptionModule ["sdImage" "bootPartitionID"] "The FAT partition for SD image now only holds the Raspberry Pi firmware files. Use firmwarePartitionID to configure that partition's ID.")
-    (mkRemovedOptionModule ["sdImage" "bootSize"] "The boot files for SD image have been moved to the main ext4 partition. The FAT partition now only holds the Raspberry Pi firmware files. Changing its size may not be required.")
     (modulesPath + "/profiles/all-hardware.nix")
   ];
 
@@ -94,59 +82,6 @@ in {
         installed U-Boot, you can instead opt to delete the existing `FIRMWARE`
         partition, which is used **only** for the Raspberry Pi family of
         hardware.
-      '';
-    };
-
-    firmwarePartition = mkOption {
-      type = types.bool;
-      default = true;
-      description = ''
-        Enables firmware partition on SD card for specific use cases,
-        particularly for Raspberry Pi.
-      '';
-    };
-
-    firmwarePartitionID = mkOption {
-      type = types.str;
-      default = "0x2178694e";
-      description = ''
-        Volume ID for the /boot/firmware partition on the SD card. This value
-        must be a 32-bit hexadecimal number.
-      '';
-    };
-
-    firmwarePartitionName = mkOption {
-      type = types.str;
-      default = "FIRMWARE";
-      description = ''
-        Name of the filesystem which holds the boot firmware.
-      '';
-    };
-
-    firmwarePartitionSize = mkOption {
-      type = types.ints.unsigned;
-      # As of 2019-08-18 the Raspberry pi firmware + u-boot takes ~18MiB
-      default = 30;
-      description = ''
-        Size of the /boot/firmware partition, in mebibytes (1024×1024 bytes).
-      '';
-    };
-
-    rootPartitionUUID = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "14e19a7b-0ae0-484d-9d54-43bd6fdc20c7";
-      description = ''
-        UUID for the filesystem on the main NixOS partition on the SD card.
-      '';
-    };
-
-    populateFirmwareCommands = mkOption {
-      example = literalExpression "'' cp \${pkgs.myBootLoader}/u-boot.bin firmware/ ''";
-      description = ''
-        Shell commands to populate the ./firmware directory.
-        All files in that directory are copied to the
-        /boot/firmware partition on the SD image.
       '';
     };
 
@@ -205,14 +140,6 @@ in {
 
   config = {
     fileSystems = {
-      "/boot/firmware" = {
-        device = "/dev/disk/by-label/${config.sdImage.firmwarePartitionName}";
-        fsType = "vfat";
-        # Alternatively, this could be removed from the configuration.
-        # The filesystem is not needed at runtime, it could be treated
-        # as an opaque blob instead of a discrete FAT32 filesystem.
-        options = ["nofail" "noauto"];
-      };
       "/" = {
         device = "/dev/disk/by-label/NIXOS_SD";
         fsType = "ext4";
@@ -245,72 +172,29 @@ in {
           echo "${pkgs.stdenv.buildPlatform.system}" > $out/nix-support/system
           echo "file sd-image $img${compressedImageExtension}" >> $out/nix-support/hydra-build-products
 
-          echo "Decompressing rootfs image"
-          zstd -d --no-progress "${rootfsImage}" -o ./root-fs.img
-
           blockSize=512
-          partitionsOffsetBlocks=$((${toString config.sdImage.partitionsOffset} * 1024 * 1024 / blockSize))
-
-          ${
-            if hasFirmwarePartition
-            then ''
-              firmwarePartitionNumber=1
-              firmwarePartitionOffsetBlocks=$partitionsOffsetBlocks
-              firmwarePartitionSizeBlocks=$((${toString config.sdImage.firmwarePartitionSize} * 1024 * 1024 / blockSize))
-              firmwarePartitionSizeBytes=$((firmwarePartitionSizeBlocks * blockSize))
-              rootPartitionNumber=2
-              rootPartitionOffsetBlocks=$((firmwarePartitionOffsetBlocks + firmwarePartitionSizeBlocks))
-            ''
-            else ''
-              rootPartitionNumber=1
-              rootPartitionOffsetBlocks=$partitionsOffsetBlocks
-            ''
-          }
-
+          rootPartitionOffsetBlocks=$((${toString config.sdImage.partitionsOffset} * 1024 * 1024 / blockSize))
           rootPartitionOffsetBytes=$((rootPartitionOffsetBlocks * blockSize))
 
           # Create the image file sized to fit /boot/firmware and /, plus slack for the gap.
-          rootPartitionSizeBlocks=$(du -B $blockSize --apparent-size ./root-fs.img | awk '{ print $1 }')
+          rootPartitionSizeBlocks=$(du -B $blockSize --apparent-size ${rootfsImage} | awk '{ print $1 }')
           rootPartitionSizeBytes=$((rootPartitionSizeBlocks * blockSize))
 
           imageSizeBytes=$((rootPartitionOffsetBytes + rootPartitionSizeBytes))
           truncate -s $imageSizeBytes $img
 
-          # type=b is 'W95 FAT32', type=83 is 'Linux'.
           # The "bootable" partition is where u-boot will look file for the bootloader
           # information (dtbs, extlinux.conf file).
           sfdisk $img <<EOF
               label: dos
-              label-id: ${config.sdImage.firmwarePartitionID}
 
-              ${lib.optionalString hasFirmwarePartition ''
-            start=$firmwarePartitionOffsetBlocks, size=$firmwarePartitionSizeBlocks, type=b
-          ''}
-              start=$rootPartitionOffsetBlocks, type=83, bootable
+              start=$rootPartitionOffsetBlocks, type=linux, bootable
           EOF
 
           # Copy the rootfs into the SD image
-          eval $(partx $img -o START,SECTORS --nr $rootPartitionNumber --pairs)
+          eval $(partx $img -o START,SECTORS --nr 1 --pairs)
           echo "Root partition: $START,$SECTORS"
-          dd conv=notrunc if=./root-fs.img of=$img seek=$START count=$SECTORS
-
-          ${lib.optionalString hasFirmwarePartition ''
-            # Create a FAT32 /boot/firmware partition of suitable size into firmware_part.img
-            eval $(partx $img -o START,SECTORS --nr $firmwarePartitionNumber --pairs)
-            echo "Firmware partition: $START,$SECTORS"
-            truncate -s $((SECTORS * blockSize)) firmware_part.img
-            faketime "1970-01-01 00:00:00" mkfs.vfat -i ${config.sdImage.firmwarePartitionID} -n ${config.sdImage.firmwarePartitionName} firmware_part.img
-
-            # Populate the files intended for /boot/firmware
-            mkdir firmware
-            ${config.sdImage.populateFirmwareCommands}
-
-            # Copy the populated /boot/firmware into the SD image
-            (cd firmware; mcopy -psvm -i ../firmware_part.img ./* ::)
-            # Verify the FAT partition before copying it.
-            fsck.vfat -vn firmware_part.img
-            dd conv=notrunc if=firmware_part.img of=$img seek=$START count=$SECTORS
-          ''}
+          dd conv=notrunc if=${rootfsImage} of=$img seek=$START count=$SECTORS
 
           ${lib.optionalString (config.sdImage.ubootPackage != null) ''
             # Install U-Boot binary image

@@ -146,12 +146,12 @@
   systemd.network = {
     enable = true;
     networks."lan" = {
-      matchConfig.Name = "end0";
+      matchConfig.Name = "enu1";
       networkConfig.DHCP = "no";
       linkConfig.RequiredForOnline = "no";
     };
     networks."wan" = {
-      matchConfig.Name = "enu1";
+      matchConfig.Name = "end0";
       networkConfig.DHCP = "yes";
       linkConfig.RequiredForOnline = "yes";
     };
